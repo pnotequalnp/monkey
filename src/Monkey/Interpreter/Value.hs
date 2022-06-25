@@ -2,6 +2,7 @@ module Monkey.Interpreter.Value where
 
 import Data.HashTable.IO (CuckooHashTable)
 import Data.Hashable (Hashable (..))
+import Data.IORef (IORef)
 import Data.Int (Int64)
 import Data.Map (Map)
 import Data.Text (Text)
@@ -24,7 +25,7 @@ data Value
   | String Text
   | Array Unique (IOVector Value)
   | Map Unique (CuckooHashTable Value Value)
-  | Closure Unique (Map Name Value) [Name] Expr
+  | Closure Unique (Map Name (IORef Value)) [Name] Expr
 
 instance Eq Value where
   PrimOp op == PrimOp op' = op == op'
@@ -50,3 +51,12 @@ instance Hashable Value where
     Array u _ -> s `hashWithSalt` (7 :: Int) `hashWithSalt` u
     Map u _ -> s `hashWithSalt` (8 :: Int) `hashWithSalt` u
     Closure u _ _ _ -> s `hashWithSalt` (9 :: Int) `hashWithSalt` u
+
+class Num a => Arith a where
+  divide :: a -> a -> a
+
+instance Arith Int64 where
+  divide = div
+
+instance Arith Double where
+  divide = (/)

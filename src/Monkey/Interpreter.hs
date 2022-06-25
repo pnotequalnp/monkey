@@ -3,57 +3,45 @@ module Monkey.Interpreter (
 ) where
 
 import Control.Applicative ((<|>))
-import Control.Monad (unless, void, when)
+import Control.Monad (unless, void, when, (<=<))
 import Data.Bits (complement, shiftL, shiftR, xor, (.&.), (.|.))
-import Data.Bool
+import Data.Bool (bool)
 import Data.Foldable (foldl', for_, traverse_)
 import Data.Functor ((<&>))
+import Data.HashTable.IO (CuckooHashTable)
 import Data.HashTable.IO qualified as HT
-import Data.Int (Int64)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List.NonEmpty (NonEmpty (..), nonEmpty)
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Text.IO qualified as T
 import Data.Unique (newUnique)
 import Data.Vector qualified as Vec
+import Data.Vector.Mutable (IOVector)
 import Data.Vector.Mutable qualified as MVec
 import Effectful
 import Effectful.Error.Static (Error, runErrorNoCallStack, throwError, tryError)
 import Effectful.Prim (Prim)
 import Effectful.Reader.Static (Reader, local, runReader)
-import Effectful.State.Static.Local (State, evalState, get, gets, modify, modifyM, put)
+import Effectful.State.Static.Local (State, evalState, get, gets, modify, put)
 import Monkey.Interpreter.Error
 import Monkey.Interpreter.Value
 import Monkey.Syntax
 
-class Num a => Arith a where
-  divide :: a -> a -> a
-
-instance Arith Int64 where
-  divide = div
-
-instance Arith Double where
-  divide = (/)
-
 type Stack = [Frame]
-type Frame = Map Name Value
+type Frame = Map Name (IORef Value)
 type Callstack = [Position]
-type Runtime = Error RuntimeError
+type RuntimeErrors = Error RuntimeError
 type Return = Error (Value, Position)
-type Eval = [IOE, Prim, Runtime, State Stack, Reader Callstack, Return]
+type Eval = [IOE, Prim, RuntimeErrors, State Stack, Reader Callstack, Return]
 
-interpret :: [IOE, Prim, Runtime] :>> es => [Statement] -> Eff es ()
-interpret prog = runReader @Callstack [] . evalState [primOps] $ do
-  runErrorNoCallStack @(Value, Position) (traverse_ exec prog) >>= \case
-    Left (_, pos) -> throwError (topLevelReturn pos)
-    Right _ -> pure ()
-
-primOps :: Frame
-primOps =
-  Map.fromList
-    [ ("print", PrimOp Print)
-    , ("input", PrimOp ReadLine)
-    ]
+interpret :: [IOE, Prim, RuntimeErrors] :>> es => [Statement] -> Eff es ()
+interpret prog = do
+  primOps <- makePrimOps
+  runReader @Callstack [] . evalState [primOps] $ do
+    runErrorNoCallStack @(Value, Position) (traverse_ exec prog) >>= \case
+      Left (_, pos) -> throwError (topLevelReturn pos)
+      Right _ -> pure ()
 
 exec :: Eval :>> es => Statement -> Eff es ()
 exec = \case
@@ -65,65 +53,41 @@ execBinding :: Eval :>> es => Position -> Name -> Expr -> Eff es ()
 execBinding _ name x = mdo
   val <- case x of
     Function _ _ _ -> do
-      pushFrame (Map.singleton name val)
+      pushFrame (Map.singleton name ref)
       f <- eval x
       dropFrame
       pure f
     _ -> eval x
+  ref <- liftIO (newIORef val)
   modify \case
     [] -> []
-    frame : frames -> Map.insert name val frame : frames
+    frame : frames -> Map.insert name ref frame : frames
 
 execAssignment :: Eval :>> es => Position -> Name -> [Either Name Expr] -> Maybe BinOp -> Expr -> Eff es ()
-execAssignment pos name path op x = case nonEmpty path of
-  Nothing -> modifyM rebind
-  Just ixs ->
-    getVar name >>= \case
-      Nothing -> throwError (unboundAssignment pos name)
-      Just val -> mutate ixs val
+execAssignment pos name path op x = do
+  ref <- getVar name >>= maybe (throwError (unboundAssignment pos name)) pure
+  val <- liftIO (readIORef ref)
+  case nonEmpty path of
+    Nothing -> do
+      val' <- reval val
+      liftIO (writeIORef ref val')
+    Just ixs -> mutate ixs val
   where
     reval prev = case op of
       Nothing -> eval x
       Just op' -> do
-        prev' <- prev
-        x' <- eval x
-        binOp (pos <+> x.position) op' prev' x'
-    rebind = \case
-      [] -> throwError (unboundAssignment pos name)
-      frame : frames
-        | Just val <- name `Map.lookup` frame -> do
-            val' <- reval (pure val)
-            pure (Map.insert name val' frame : frames)
-      _ : frames -> rebind frames
+        val <- eval x
+        binOp (pos <+> x.position) op' prev val
     mutate (ix :| indices) val = case nonEmpty indices of
       Nothing | Left field <- ix ->
         case val of
-          Map _ m -> do
-            val' <-
-              reval $
-                liftIO (HT.lookup m (String field)) >>= \case
-                  Nothing -> throwError (keyNotInMap pos (String field))
-                  Just val' -> pure val'
-            liftIO (HT.insert m (String field) val')
+          Map _ m -> modifyMap pos m (String field) reval
           nonMap -> throwError (nonMapAccess pos nonMap)
       Nothing | Right ix' <- ix -> do
         i <- eval ix'
         case val of
-          Array _ v
-            | Int i' <- i
-            , let i'' = fromIntegral i'
-            , i'' < MVec.length v -> do
-                val' <- reval (liftIO (MVec.read v i''))
-                liftIO (MVec.write v i'' val')
-            | Int i' <- i -> throwError (arrayOutOfBounds pos i')
-            | otherwise -> throwError (nonIntIndex pos i)
-          Map _ m -> do
-            val' <-
-              reval $
-                liftIO (HT.lookup m i) >>= \case
-                  Nothing -> throwError (keyNotInMap pos i)
-                  Just val' -> pure val'
-            liftIO (HT.insert m i val')
+          Array _ v -> modifyArray pos v i reval
+          Map _ m -> modifyMap pos m i reval
           nonStructure -> throwError (invalidIndex pos nonStructure i)
       Just ixs -> do
         val' <- case ix of
@@ -159,7 +123,7 @@ evalLit _ = \case
     u <- liftIO newUnique
     Array u <$> Vec.unsafeThaw vals
   MapLit xs -> do
-    t <- liftIO HT.new
+    t <- liftIO (HT.newSized (length xs))
     for_ xs \(k, v) -> do
       key <- eval k
       val <- eval v
@@ -171,7 +135,7 @@ evalVar :: Eval :>> es => Position -> Name -> Eff es Value
 evalVar pos name =
   getVar name >>= \case
     Nothing -> throwError (unboundVar pos name)
-    Just val -> pure val
+    Just ref -> liftIO (readIORef ref)
 
 evalIndex :: Eval :>> es => Position -> Expr -> Expr -> Eff es Value
 evalIndex pos x ix = do
@@ -180,14 +144,8 @@ evalIndex pos x ix = do
   index pos val i
 
 index :: Eval :>> es => Position -> Value -> Value -> Eff es Value
-index pos (Map _ m) ix =
-  liftIO (HT.lookup m ix) >>= \case
-    Nothing -> throwError (keyNotInMap pos ix)
-    Just val -> pure val
-index pos (Array _ v) (Int ix)
-  | fromIntegral ix >= MVec.length v = throwError (arrayOutOfBounds pos ix)
-  | otherwise = MVec.read v (fromIntegral ix)
-index pos (Array _ _) ix = throwError (nonIntIndex pos ix)
+index pos (Map _ m) ix = readMap pos m ix
+index pos (Array _ v) ix = readArray pos v ix
 index pos nonStructure ix = throwError (invalidIndex pos nonStructure ix)
 
 evalAccess :: Eval :>> es => Position -> Name -> Expr -> Eff es Value
@@ -196,10 +154,7 @@ evalAccess pos field x = do
   access pos field val
 
 access :: Eval :>> es => Position -> Name -> Value -> Eff es Value
-access pos field (Map _ m) =
-  liftIO (HT.lookup m (String field)) >>= \case
-    Nothing -> throwError (keyNotInMap pos (String field))
-    Just res -> pure res
+access pos field (Map _ m) = readMap pos m (String field)
 access pos _ nonMap = throwError (nonMapAccess pos nonMap)
 
 evalCall :: Eval :>> es => Position -> Expr -> [Expr] -> Eff es Value
@@ -208,7 +163,7 @@ evalCall pos f args =
     Closure _ env params body -> do
       when (length params /= length args) do
         throwError (invalidArity pos (length params) (length args))
-      vals <- traverse eval args
+      vals <- traverse (liftIO . newIORef <=< eval) args
       let args' = Map.fromList (zip params vals)
       stack <- get @Stack
       put [args', env]
@@ -302,10 +257,7 @@ binOp pos op l r = case op of
       (Map u _, Map u' _) -> pure (Bool (u == u'))
       (Closure u _ _ _, Closure u' _ _ _) -> pure (Bool (u == u'))
       _ -> throwError (invalidBinOp pos op l r)
-    neq =
-      eq <&> \case
-        Bool b -> Bool (not b)
-        x -> x
+    neq = eq <&> \case Bool b -> Bool (not b); x -> x
     cmpOp :: (forall a. Ord a => a -> a -> Bool) -> Eff es Value
     cmpOp f = case (l, r) of
       (Unit, Unit) -> pure (Bool (f () ()))
@@ -370,7 +322,31 @@ evalFunction _ params body = do
   u <- liftIO newUnique
   pure (Closure u env params body)
 
-getVar :: State Stack :> es => Name -> Eff es (Maybe Value)
+readMap :: [IOE, RuntimeErrors] :>> es => Position -> CuckooHashTable Value Value -> Value -> Eff es Value
+readMap pos m ix =
+  liftIO (HT.lookup m ix) >>= \case
+    Nothing -> throwError (keyNotInMap pos ix)
+    Just val -> pure val
+
+modifyMap :: [IOE, RuntimeErrors] :>> es => Position -> CuckooHashTable Value Value -> Value -> (Value -> Eff es Value) -> Eff es ()
+modifyMap pos m ix f = do
+  val <- readMap pos m ix
+  val' <- f val
+  liftIO (HT.insert m ix val')
+
+readArray :: [Prim, RuntimeErrors] :>> es => Position -> IOVector Value -> Value -> Eff es Value
+readArray pos v (Int ix)
+  | fromIntegral ix >= MVec.length v = throwError (arrayOutOfBounds pos ix)
+  | otherwise = MVec.read v (fromIntegral ix)
+readArray pos _ ix = throwError (nonIntIndex pos ix)
+
+modifyArray :: [Prim, RuntimeErrors] :>> es => Position -> IOVector Value -> Value -> (Value -> Eff es Value) -> Eff es ()
+modifyArray pos v (Int ix) f
+  | fromIntegral ix >= MVec.length v = throwError (arrayOutOfBounds pos ix)
+  | otherwise = MVec.modifyM v f (fromIntegral ix)
+modifyArray pos _ ix _ = throwError (nonIntIndex pos ix)
+
+getVar :: State Stack :> es => Name -> Eff es (Maybe (IORef Value))
 getVar name = gets @Stack (foldr ((<|>) . Map.lookup name) Nothing)
 
 pushFrame :: State Stack :> es => Frame -> Eff es ()
@@ -378,3 +354,11 @@ pushFrame = modify . (:)
 
 dropFrame :: State Stack :> es => Eff es ()
 dropFrame = modify @Stack (drop 1)
+
+makePrimOps :: IOE :> es => Eff es Frame
+makePrimOps =
+  traverse (liftIO . newIORef) $
+    Map.fromList
+      [ ("print", PrimOp Print)
+      , ("input", PrimOp ReadLine)
+      ]
