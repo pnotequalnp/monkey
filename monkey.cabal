@@ -1,0 +1,66 @@
+cabal-version: 3.0
+name:          monkey
+version:       0.0.0.0
+license:       ISC
+license-file:  LICENSE
+copyright:     Kevin Mullins 2022
+maintainer:    kevin@pnotequalnp.com
+author:        Kevin Mullins
+homepage:      https://github.com/pnotequalnp/monkey
+bug-reports:   https://github.com/pnotequalnp/monkey/issues
+synopsis:      Procedural Programming Language
+description:
+    Procedural programming language
+
+category:      Language
+
+source-repository head
+    type:     git
+    location: https://github.com/pnotequalnp/monkey
+
+common base
+    default-language:   GHC2021
+    default-extensions:
+        BlockArguments DataKinds DerivingVia DuplicateRecordFields
+        LambdaCase NoFieldSelectors NoStarIsType OverloadedRecordDot
+        OverloadedStrings RecursiveDo
+
+    ghc-options:        -Wall -Wcompat -Werror=incomplete-patterns
+    build-depends:
+        base ^>=4.16.0,
+        bytestring ^>=0.11.3,
+        effectful ^>=0.1,
+        diagnose ^>=2.0.0,
+        text ^>=2.0
+
+library
+    import:          base
+    exposed-modules:
+        Monkey
+        Monkey.Interpreter
+        Monkey.Interpreter.Error
+        Monkey.Interpreter.Value
+        Monkey.Parser
+        Monkey.Syntax
+
+    hs-source-dirs:  src
+    build-depends:
+        containers ^>=0.6.5,
+        hashable ^>=1.4.0,
+        hashtables ^>=1.2.4,
+        megaparsec ^>=9.2.0,
+        parser-combinators ^>=1.3.0,
+        vector ^>=0.12.3
+
+executable monkey
+    import:          base
+    main-is:         Main.hs
+    hs-source-dirs:  app
+    other-modules:
+        Monkey.Options
+        Paths_monkey
+
+    autogen-modules: Paths_monkey
+    build-depends:
+        optparse-applicative ^>=0.16.1,
+        monkey

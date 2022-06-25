@@ -1,0 +1,60 @@
+{
+  "nodes": {
+    "diagnose": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1651853913,
+        "narHash": "sha256-3RKfvfC7oSbiCqqHD7qYvZILUHbBj0AbwUA6WvS3Vy8=",
+        "owner": "mesabloo",
+        "repo": "diagnose",
+        "rev": "927cdcb9fdeaffdbe2a0335068561941002e0d98",
+        "type": "github"
+      },
+      "original": {
+        "owner": "mesabloo",
+        "repo": "diagnose",
+        "type": "github"
+      }
+    },
+    "effectful": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1653973964,
+        "narHash": "sha256-96mW/plPvDjAYqYMAY3aee8g8mgvstYgkXw0dHeGcCM=",
+        "owner": "haskell-effectful",
+        "repo": "effectful",
+        "rev": "f95b08cd3f33695c0ddef2db61f009a0c6a8e7aa",
+        "type": "github"
+      },
+      "original": {
+        "owner": "haskell-effectful",
+        "repo": "effectful",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1652840887,
+        "narHash": "sha256-gEK4NNa4GwIgTZE63kt/4WTFAWRTJVSa30+h4ZjFh9U=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "52dc75a4fee3fdbcb792cb6fba009876b912bfe0",
+        "type": "github"
+      },
+      "original": {
+        "id": "nixpkgs",
+        "ref": "nixpkgs-unstable",
+        "type": "indirect"
+      }
+    },
+    "root": {
+      "inputs": {
+        "diagnose": "diagnose",
+        "effectful": "effectful",
+        "nixpkgs": "nixpkgs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
