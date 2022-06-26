@@ -71,7 +71,7 @@ calledNonFunction :: Position -> Value -> RuntimeError
 calledNonFunction pos nonFunction = def `addReport` err Nothing msg [(pos, This usage)] hints
   where
     msg = "invalid function call"
-    usage = T.concat ["object of type ", quotedType nonFunction, "called"]
+    usage = T.concat ["object of type ", quotedType nonFunction, " called"]
     hints = ["only `closure`s and `primop`s can be called"]
 
 nonNumberNegation :: Position -> Value -> RuntimeError
@@ -137,7 +137,17 @@ invalidArity :: Position -> Int -> Int -> RuntimeError
 invalidArity pos expected actual = def `addReport` err Nothing msg [(pos, This usage)] []
   where
     msg = "invalid function arity"
-    usage = T.concat ["function expecting ", showt expected, " arguments, but called with ", showt actual ]
+    usage = T.concat ["function expecting ", showt expected, " argument", plural, ", but called with ", showt actual ]
+    plural = case expected of
+      1 -> ""
+      _ -> "s"
+
+invalidLength :: Position -> Value -> RuntimeError
+invalidLength pos nonStructure = def `addReport` err Nothing msg [(pos, This usage)] hints
+  where
+    msg = "invalid length"
+    usage = "attempt to get length of object of type " <> quotedType nonStructure
+    hints = ["only `array`s have a length"]
 
 showt :: Show a => a -> Text
 showt = T.pack . show

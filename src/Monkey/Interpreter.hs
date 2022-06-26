@@ -195,6 +195,13 @@ evalPrimOp pos op args = case op of
     unless (null args) do
       throwError (invalidArity pos 0 (length args))
     String <$> liftIO T.getLine
+  Length -> do
+    arg <- case args of
+      [arg] -> eval arg
+      _ -> throwError (invalidArity pos 1 (length args))
+    case arg of
+      Array _ v -> pure (Int (fromIntegral (MVec.length v)))
+      _ -> throwError (invalidLength pos arg)
 
 evalUnOp :: Eval :>> es => Position -> UnOp -> Expr -> Eff es Value
 evalUnOp pos op x = do
@@ -359,6 +366,7 @@ makePrimOps :: IOE :> es => Eff es Frame
 makePrimOps =
   traverse (liftIO . newIORef) $
     Map.fromList
-      [ ("print", PrimOp Print)
+      [ ("puts", PrimOp Print)
       , ("input", PrimOp ReadLine)
+      , ("len", PrimOp Length)
       ]

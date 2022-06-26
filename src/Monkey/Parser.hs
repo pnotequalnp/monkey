@@ -148,10 +148,8 @@ function :: Parser Expr
 function = do
   open <- getSourcePos
   _ <- symbol "fn"
-  _ <- symbol "("
-  params <- (lexeme identifier `sepBy` symbol ",")
+  params <- parens (lexeme identifier `sepBy` symbol ",")
   body <- block
-  _ <- char ')'
   close <- getSourcePos
   pure (Function (toPosition open close) params body)
 
@@ -159,7 +157,7 @@ block :: Parser Expr
 block = do
   open <- getSourcePos
   _ <- symbol "{"
-  stmts <- many statement
+  stmts <- many (try statement)
   val <- optional expr
   _ <- char '}'
   close <- getSourcePos
@@ -193,7 +191,7 @@ ifElse = do
   cond <- lexeme expr
   body <- block
   end <- optional do
-    _ <- hidden sc
+    _ <- sc
     _ <- symbol "else"
     block <|> ifElse
   close <- getSourcePos

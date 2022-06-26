@@ -13,6 +13,7 @@ import Monkey.Syntax (Expr, Name)
 data PrimOp
   = Print
   | ReadLine
+  | Length
   deriving stock (Enum, Eq, Ord)
 
 data Value
