@@ -280,7 +280,7 @@ binOp pos op l r = case op of
     shiftOp f = case (l, r) of
       (Int x, Int y)
         | y >= 0 -> pure (Int (f x (fromIntegral y)))
-        | otherwise -> throwError (negativeShift pos op y)
+        | otherwise -> throwError (negativeShift pos)
       _ -> throwError (invalidBinOp pos op l r)
 
 evalBlock :: Eval :>> es => Position -> [Statement] -> Maybe Expr -> Eff es Value
@@ -336,13 +336,13 @@ modifyMap pos m ix f = do
 
 readArray :: [Prim, RuntimeErrors] :>> es => Position -> IOVector Value -> Value -> Eff es Value
 readArray pos v (Int ix)
-  | fromIntegral ix >= MVec.length v = throwError (arrayOutOfBounds pos ix)
+  | fromIntegral ix >= MVec.length v = throwError (arrayOutOfBounds pos)
   | otherwise = MVec.read v (fromIntegral ix)
 readArray pos _ ix = throwError (nonIntIndex pos ix)
 
 modifyArray :: [Prim, RuntimeErrors] :>> es => Position -> IOVector Value -> Value -> (Value -> Eff es Value) -> Eff es ()
 modifyArray pos v (Int ix) f
-  | fromIntegral ix >= MVec.length v = throwError (arrayOutOfBounds pos ix)
+  | fromIntegral ix >= MVec.length v = throwError (arrayOutOfBounds pos)
   | otherwise = MVec.modifyM v f (fromIntegral ix)
 modifyArray pos _ ix _ = throwError (nonIntIndex pos ix)
 
