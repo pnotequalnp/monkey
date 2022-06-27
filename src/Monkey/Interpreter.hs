@@ -3,15 +3,16 @@ module Monkey.Interpreter (
 ) where
 
 import Control.Applicative ((<|>))
-import Control.Monad (unless, void, when, (<=<))
+import Control.Monad (foldM, unless, void, when, (<=<))
 import Data.Bits (complement, shiftL, shiftR, xor, (.&.), (.|.))
 import Data.Bool (bool)
-import Data.Foldable (foldl', for_, traverse_)
+import Data.Foldable (for_, traverse_)
 import Data.Functor ((<&>))
 import Data.HashTable.IO (CuckooHashTable)
 import Data.HashTable.IO qualified as HT
-import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, modifyIORef, newIORef, readIORef, writeIORef)
 import Data.List.NonEmpty (NonEmpty (..), nonEmpty)
+import Data.List.NonEmpty qualified as NE
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Text.IO qualified as T
@@ -21,24 +22,29 @@ import Data.Vector.Mutable (IOVector)
 import Data.Vector.Mutable qualified as MVec
 import Effectful
 import Effectful.Error.Static (Error, runErrorNoCallStack, throwError, tryError)
-import Effectful.Prim (Prim)
-import Effectful.Reader.Static (Reader, local, runReader)
-import Effectful.State.Static.Local (State, evalState, get, gets, modify, put)
+import Effectful.Prim (Prim, runPrim)
+import Effectful.Reader.Static (Reader, ask, local, runReader)
 import Monkey.Interpreter.Error
 import Monkey.Interpreter.Value
 import Monkey.Syntax
 
-type Stack = [Frame]
-type Frame = Map Name (IORef Value)
-type Callstack = [Position]
+data Frame = Frame
+  { callPosition :: Maybe Position
+  , locals :: IORef [SubFrame]
+  }
+
+type Stack = NonEmpty Frame
+type SubFrame = Map Name (IORef Value)
 type RuntimeErrors = Error RuntimeError
 type Return = Error (Value, Position)
-type Eval = [IOE, Prim, RuntimeErrors, State Stack, Reader Callstack, Return]
+type Eval = [IOE, Prim, RuntimeErrors, Reader Stack, Return]
 
-interpret :: [IOE, Prim, RuntimeErrors] :>> es => [Statement] -> Eff es ()
+interpret :: [IOE, RuntimeErrors] :>> es => [Statement] -> Eff es ()
 interpret prog = do
   primOps <- makePrimOps
-  runReader @Callstack [] . evalState [primOps] $ do
+  locals <- liftIO (newIORef [primOps])
+  let frame = Frame Nothing locals
+  runPrim . runReader @Stack (NE.singleton frame) $ do
     runErrorNoCallStack @(Value, Position) (traverse_ exec prog) >>= \case
       Left (_, pos) -> throwError (topLevelReturn pos)
       Right _ -> pure ()
@@ -53,15 +59,16 @@ execBinding :: Eval :>> es => Position -> Name -> Expr -> Eff es ()
 execBinding _ name x = mdo
   val <- case x of
     Function _ _ _ -> do
-      pushFrame (Map.singleton name ref)
+      pushSubFrame (Map.singleton name ref)
       f <- eval x
-      dropFrame
+      dropSubFrame
       pure f
     _ -> eval x
   ref <- liftIO (newIORef val)
-  modify \case
-    [] -> []
-    frame : frames -> Map.insert name ref frame : frames
+  frame :| _ <- ask @Stack
+  liftIO $ modifyIORef frame.locals \case
+    [] -> error "internal error"
+    subframe : subframes -> Map.insert name ref subframe : subframes
 
 execAssignment :: Eval :>> es => Position -> Name -> [Either Name Expr] -> Maybe BinOp -> Expr -> Eff es ()
 execAssignment pos name path op x = do
@@ -165,10 +172,9 @@ evalCall pos f args =
         throwError (invalidArity pos (length params) (length args))
       vals <- traverse (liftIO . newIORef <=< eval) args
       let args' = Map.fromList (zip params vals)
-      stack <- get @Stack
-      put [args', env]
-      ret <- tryError @(Value, Position) (local (pos :) (eval body))
-      put stack
+      locals <- liftIO (newIORef [args' <> env])
+      let frame = Frame (Just pos) locals
+      ret <- tryError @(Value, Position) (local (NE.cons frame) (eval body))
       pure (either (fst . snd) id ret)
     PrimOp op -> evalPrimOp pos op args
     nonFunction -> throwError (calledNonFunction pos nonFunction)
@@ -292,10 +298,10 @@ binOp pos op l r = case op of
 
 evalBlock :: Eval :>> es => Position -> [Statement] -> Maybe Expr -> Eff es Value
 evalBlock _ stmts x = do
-  pushFrame Map.empty
+  pushSubFrame Map.empty
   traverse_ exec stmts
   val <- maybe (pure Unit) eval x
-  dropFrame
+  dropSubFrame
   pure val
 
 evalWhile :: Eval :>> es => Position -> Expr -> Expr -> Eff es Value
@@ -323,11 +329,17 @@ evalReturn pos = \case
     val <- eval x
     throwError (val, pos)
 
-evalFunction :: Eval :>> es => Position -> [Name] -> Expr -> Eff es Value
+evalFunction :: forall es. Eval :>> es => Position -> [Name] -> Expr -> Eff es Value
 evalFunction _ params body = do
-  env <- gets @Stack (foldl' (flip Map.union) Map.empty)
+  stack <- ask @Stack
+  env <- foldM collect Map.empty stack
   u <- liftIO newUnique
   pure (Closure u env params body)
+  where
+    collect :: SubFrame -> Frame -> Eff es SubFrame
+    collect subframe frame = do
+      locals <- liftIO (readIORef frame.locals)
+      pure (foldr (<>) subframe locals)
 
 readMap :: [IOE, RuntimeErrors] :>> es => Position -> CuckooHashTable Value Value -> Value -> Eff es Value
 readMap pos m ix =
@@ -353,16 +365,28 @@ modifyArray pos v (Int ix) f
   | otherwise = MVec.modifyM v f (fromIntegral ix)
 modifyArray pos _ ix _ = throwError (nonIntIndex pos ix)
 
-getVar :: State Stack :> es => Name -> Eff es (Maybe (IORef Value))
-getVar name = gets @Stack (foldr ((<|>) . Map.lookup name) Nothing)
+getVar :: [IOE, Reader Stack] :>> es => Name -> Eff es (Maybe (IORef Value))
+getVar name = ask @Stack >>= foldM search Nothing
+  where
+    search val frame = case val of
+      Nothing -> do
+        subframes <- liftIO (readIORef frame.locals)
+        pure (foldr ((<|>) . Map.lookup name) Nothing subframes)
+      Just ref -> pure (Just ref)
 
-pushFrame :: State Stack :> es => Frame -> Eff es ()
-pushFrame = modify . (:)
+pushSubFrame :: [IOE, Reader Stack] :>> es => SubFrame -> Eff es ()
+pushSubFrame subframe = do
+  frame :| _ <- ask @Stack
+  liftIO (modifyIORef frame.locals (subframe :))
 
-dropFrame :: State Stack :> es => Eff es ()
-dropFrame = modify @Stack (drop 1)
+dropSubFrame :: [IOE, Reader Stack] :>> es => Eff es ()
+dropSubFrame = do
+  frame :| _ <- ask @Stack
+  liftIO $ modifyIORef frame.locals \case
+    [] -> []
+    _ : subframes -> subframes
 
-makePrimOps :: IOE :> es => Eff es Frame
+makePrimOps :: IOE :> es => Eff es SubFrame
 makePrimOps =
   traverse (liftIO . newIORef) $
     Map.fromList
